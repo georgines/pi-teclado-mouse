@@ -1,0 +1,2 @@
+Vendored commit: u8g2pico=16a1428e51947db1ece39ffa825800fe92bff673
+Vendored commit: u8g2=ab9e48b2228351e9476682a70b7f3ee4909cd585
