@@ -13,7 +13,7 @@ computador alvo — injete teclas e movimentos de mouse nesse computador,
 enviando comandos simples por UART para o Pico. O Pico atua como ponte:
 recebe pela UART, valida, e reproduz como HID nativo pela USB. Um display
 OLED opcional mostra o estado atual do dispositivo (conexão USB, modo do
-mouse, teclas pressionadas, contadores de erro) para depuração no bancada.
+mouse, teclas pressionadas, contadores de erro, contatos fechados) para depuração no bancada.
 
 Este firmware não inclui MCP nem integração direta com agentes de IA — a
 ponte é puramente o protocolo UART descrito neste documento; qualquer
