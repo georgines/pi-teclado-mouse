@@ -46,11 +46,12 @@ integração de mais alto nível fala o protocolo UART por fora.
 
 Executar apenas os gates relevantes à alteração.
 
-Lógica pura alterada (`src/uart_protocol.*`, `src/hid_state.*`, `src/crc16.hpp`):
+Lógica pura alterada (`src/uart_protocol.*`, `src/hid_state.*`,
+`src/timed_actions.*`, `src/crc16.hpp`):
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -Isrc tests/test_uart_protocol.cpp \
-    src/uart_protocol.cpp src/hid_state.cpp -o /tmp/t && /tmp/t
+    src/uart_protocol.cpp src/hid_state.cpp src/timed_actions.cpp -o /tmp/t && /tmp/t
 ```
 
 Qualquer código de firmware alterado (inclui o acima):

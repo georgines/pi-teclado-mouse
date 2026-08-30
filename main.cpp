@@ -32,8 +32,15 @@
 #include "src/mode_button.hpp"
 #include "src/hid_usb.hpp"
 #include "src/oled_display.hpp"
+#include "src/contacts.hpp"
 
 int main() {
+    // Antes de qualquer outra inicialização: os quatro contatos do painel
+    // frontal vão ao nível aberto. Um reset com um contato fechado por
+    // CONTACT_DOWN termina com o contato aberto — ele não sobrevive ao
+    // firmware que o fechou.
+    contacts::init();
+
     board_init();
     shared_state_init();
 

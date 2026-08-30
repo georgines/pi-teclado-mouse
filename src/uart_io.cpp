@@ -3,6 +3,8 @@
 #include "hid_state.hpp"
 #include "hid_usb.hpp"
 #include "mode_button.hpp"
+#include "timed_actions.hpp"
+#include "contacts.hpp"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
@@ -129,7 +131,62 @@ void send_status(uint16_t seq) {
     queue_tx(buf, encode_status(buf, seq, reinterpret_cast<const uint8_t*>(&snap), sizeof(snap)));
 }
 
+uint16_t rd16(const uint8_t* p) {
+    return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
+}
+
+// Aplica as transições devolvidas pela tabela de temporizadores: tecla afunda
+// ou solta, contato fecha ou abre.
+void apply_timed_events(const TimedEvent* evs, size_t n) {
+    bool keyboard_touched = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (evs[i].kind == TimedKind::ContactPulse) {
+            contacts::set(evs[i].target, evs[i].press);
+            continue;
+        }
+        if (evs[i].press) {
+            g_keyboard_state.key_down(evs[i].target);
+        } else {
+            g_keyboard_state.key_up(evs[i].target);
+        }
+        keyboard_touched = true;
+    }
+    if (keyboard_touched) hid_usb::mark_keyboard_dirty();
+}
+
+void cancel_key_timer(uint8_t usage) {
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    apply_timed_events(evs, g_timed_actions.cancel_key(usage, evs, MAX_TIMED_ACTIONS));
+}
+
+void cancel_contact_timer(uint8_t contact) {
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    apply_timed_events(evs, g_timed_actions.cancel_contact(contact, evs, MAX_TIMED_ACTIONS));
+}
+
+void cancel_keyboard_timers() {
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    apply_timed_events(evs, g_timed_actions.cancel_keys(evs, MAX_TIMED_ACTIONS));
+}
+
+// Rede de segurança: nenhum temporizador pendente e nenhum contato fechado.
+// Um temporizador pendente é uma tecla que seria afundada no futuro, e um
+// contato fechado é o botão de força segurado, possivelmente sem ninguém no
+// controle.
+void abort_all_timed() {
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    apply_timed_events(evs, g_timed_actions.cancel_all(evs, MAX_TIMED_ACTIONS));
+    contacts::open_all();
+}
+
+void send_contacts(uint16_t seq) {
+    uint8_t payload[1] = {contacts::bitmap()};
+    uint8_t buf[11];
+    queue_tx(buf, encode_frame(buf, static_cast<uint8_t>(RespType::Contacts), seq, payload, 1));
+}
+
 void clear_hid_state_and_queue() {
+    abort_all_timed();
     g_keyboard_state.release_all();
     g_mouse_state.release_all_buttons();
     cmd_head = cmd_tail = cmd_count = 0;
@@ -141,8 +198,11 @@ void clear_hid_state_and_queue() {
 bool is_known_cmd(uint8_t t) {
     switch (static_cast<CmdType>(t)) {
         case CmdType::Ping: case CmdType::GetStatus: case CmdType::KeyDown: case CmdType::KeyUp:
-        case CmdType::KeyReleaseAll: case CmdType::MouseMove: case CmdType::MouseButtons:
+        case CmdType::KeyReleaseAll: case CmdType::KeyHold: case CmdType::KeyHammer:
+        case CmdType::MouseMove: case CmdType::MouseButtons:
         case CmdType::MouseWheel: case CmdType::MouseReleaseAll: case CmdType::SetMouseMode:
+        case CmdType::ContactPulse: case CmdType::ContactDown: case CmdType::ContactUp:
+        case CmdType::GetContacts:
             return true;
     }
     return false;
@@ -155,7 +215,7 @@ void mark_mouse_dirty_for_current_mode() {
                                                  : hid_usb::mark_mouse_abs_dirty();
 }
 
-bool apply_command(const PendingCommand& c, ErrCode& err) {
+bool apply_command(const PendingCommand& c, uint32_t now_ms, ErrCode& err) {
     switch (c.type) {
         case CmdType::Ping:
             return true;
@@ -173,6 +233,9 @@ bool apply_command(const PendingCommand& c, ErrCode& err) {
         case CmdType::KeyUp:
             if (c.len != 1) { err = ErrCode::Length; return false; }
             if (!usb_ready_for_hid()) { err = ErrCode::UsbNotReady; return false; }
+            // Quem manda soltar, soltou: um KEY_HOLD/KEY_HAMMER em curso sobre
+            // esse usage morre aqui.
+            cancel_key_timer(c.payload[0]);
             g_keyboard_state.key_up(c.payload[0]);
             hid_usb::mark_keyboard_dirty();
             return true;
@@ -180,9 +243,42 @@ bool apply_command(const PendingCommand& c, ErrCode& err) {
         case CmdType::KeyReleaseAll:
             if (c.len != 0) { err = ErrCode::Length; return false; }
             if (!usb_ready_for_hid()) { err = ErrCode::UsbNotReady; return false; }
+            // Sem cancelar os temporizadores, o release_all do host deixaria de
+            // ser rede de segurança: soltaria o que está afundado e um
+            // temporizador afundaria de novo depois.
+            cancel_keyboard_timers();
             g_keyboard_state.release_all();
             hid_usb::mark_keyboard_dirty();
             return true;
+
+        case CmdType::KeyHold:
+        case CmdType::KeyHammer: {
+            const bool hammer = (c.type == CmdType::KeyHammer);
+            if (c.len != (hammer ? 5 : 3)) { err = ErrCode::Length; return false; }
+            if (!usb_ready_for_hid()) { err = ErrCode::UsbNotReady; return false; }
+            const uint8_t usage = c.payload[0];
+            const uint16_t duration = rd16(&c.payload[1]);
+            const uint16_t interval = hammer ? rd16(&c.payload[3]) : 0;
+            if (duration == 0) { err = ErrCode::BadPayload; return false; }
+            if (hammer && (interval == 0 || interval > duration)) {
+                err = ErrCode::BadPayload;
+                return false;
+            }
+            const bool scheduled =
+                hammer ? g_timed_actions.schedule_key_hammer(usage, duration, interval, now_ms)
+                       : g_timed_actions.schedule_key_hold(usage, duration, now_ms);
+            if (!scheduled) { err = ErrCode::QueueFull; return false; }
+            if (!g_keyboard_state.key_down(usage)) {
+                // key_down() só recusa um usage que ainda não estava afundado —
+                // portanto sem temporizador anterior que o agendamento acima
+                // pudesse ter substituído. Desfazer é seguro.
+                cancel_key_timer(usage);
+                err = ErrCode::TooManyKeys;
+                return false;
+            }
+            hid_usb::mark_keyboard_dirty();
+            return true;
+        }
 
         case CmdType::MouseMove: {
             if (c.len != 4) { err = ErrCode::Length; return false; }
@@ -227,18 +323,58 @@ bool apply_command(const PendingCommand& c, ErrCode& err) {
             }
             mode_button::mode_set(c.payload[0] == 0 ? MouseMode::Relative : MouseMode::Absolute);
             return true;
+
+        // Os contatos NÃO exigem USB pronto: a máquina controlada desligada é
+        // exatamente o caso em que o host precisa fechar o contato de força, e
+        // com ela desligada não existe enumeração USB para esperar.
+        case CmdType::ContactPulse: {
+            if (c.len != 3) { err = ErrCode::Length; return false; }
+            const uint8_t contact = c.payload[0];
+            const uint16_t duration = rd16(&c.payload[1]);
+            if (!contacts::valid(contact) || duration == 0) {
+                err = ErrCode::BadPayload;
+                return false;
+            }
+            if (!g_timed_actions.schedule_contact_pulse(contact, duration, now_ms)) {
+                err = ErrCode::QueueFull;
+                return false;
+            }
+            contacts::set(contact, true);
+            return true;
+        }
+
+        case CmdType::ContactDown:
+            if (c.len != 1) { err = ErrCode::Length; return false; }
+            if (!contacts::valid(c.payload[0])) { err = ErrCode::BadPayload; return false; }
+            contacts::set(c.payload[0], true);
+            return true;
+
+        case CmdType::ContactUp:
+            if (c.len != 1) { err = ErrCode::Length; return false; }
+            if (!contacts::valid(c.payload[0])) { err = ErrCode::BadPayload; return false; }
+            cancel_contact_timer(c.payload[0]);
+            contacts::set(c.payload[0], false);
+            return true;
+
+        case CmdType::GetContacts:
+            if (c.len != 0) { err = ErrCode::Length; return false; }
+            return true; // dispatch_one() responde CONTACTS, não ACK
     }
     err = ErrCode::UnknownCmd;
     return false;
 }
 
-void dispatch_one(const PendingCommand& c) {
+void dispatch_one(const PendingCommand& c, uint32_t now_ms) {
     if (c.type == CmdType::GetStatus) {
         send_status(c.seq);
         return;
     }
     ErrCode err = ErrCode::BadPayload;
-    if (apply_command(c, err)) {
+    if (apply_command(c, now_ms, err)) {
+        if (c.type == CmdType::GetContacts) {
+            send_contacts(c.seq);
+            return;
+        }
         send_ack(c.seq);
         republish_snapshot();
     } else {
@@ -257,6 +393,7 @@ void enqueue_command(const ParsedFrame& f) {
         send_nack(f.seq, ErrCode::QueueFull);
         error_count++;
         emit_event1(EventCode::QueueOverflow);
+        abort_all_timed();
         return;
     }
     PendingCommand& slot = cmd_queue[cmd_head];
@@ -327,13 +464,21 @@ void poll(uint32_t now_ms) {
         rx_overflow = false;
         error_count++;
         emit_event1(EventCode::BufferOverflow);
+        abort_all_timed();
     }
 
     while (cmd_count > 0) {
         PendingCommand c = cmd_queue[cmd_tail];
         cmd_tail = (cmd_tail + 1) % CMD_QUEUE_SIZE;
         cmd_count--;
-        dispatch_one(c);
+        dispatch_one(c, now_ms);
+    }
+
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    size_t fired = g_timed_actions.tick(now_ms, evs, MAX_TIMED_ACTIONS);
+    if (fired > 0) {
+        apply_timed_events(evs, fired);
+        republish_snapshot();
     }
 
     bool oled_ok = shared_state_get_oled_ok();
