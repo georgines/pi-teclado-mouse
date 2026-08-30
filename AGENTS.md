@@ -94,14 +94,19 @@ hardware` no relatório; isso não conta como aprovado.
 Toda operação Git segue a skill `/git-flow`, que é a fonte de verdade.
 
 * `develop` é a branch de desenvolvimento e integração; `main` é a estável.
-* `main` e `develop` são protegidas: nunca commitar direto, nunca force-push,
-  nunca reescrever histórico publicado.
-* Toda tarefa usa branch própria criada a partir de `develop`.
-* Toda alteração entra por Pull Request para `develop`.
-* `develop` só é promovida para `main` quando tudo está funcionando: gates
-  verdes e verificação em hardware feita.
-* Commits pequenos, focados e relacionados à tarefa.
-* Rodar os gates aplicáveis antes do PR.
+* Todo pedido de alteração usa branch própria criada a partir de `develop`.
+* Commitar ao longo do trabalho, no padrão Conventional Commits, um assunto
+  por commit.
+* Terminado o trabalho e com os gates verdes, merge `--no-ff` da branch para
+  `develop` e a branch é apagada.
+* `main` nunca recebe commit direto nem merge local: é atualizada apenas por
+  Pull Request vindo de `develop`, e apenas quando o autor pedir.
+* `git push`, Pull Request e qualquer atualização de `main` são do autor do
+  repositório — entregues como comando pronto, nunca executados por conta
+  própria.
+* No remoto existem apenas `main` e `develop`.
+* Rodar os gates aplicáveis antes do merge, e registrar o que ficou por
+  verificar em hardware.
 * Conflitos são resolvidos preservando alterações válidas existentes.
 
 ## Orquestração obrigatória
