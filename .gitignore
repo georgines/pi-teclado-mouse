@@ -1,2 +1,4 @@
 build
 !.vscode/*
+.claude/RESUME.md
+agents/
