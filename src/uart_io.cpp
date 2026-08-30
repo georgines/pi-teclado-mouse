@@ -82,12 +82,24 @@ void on_uart_irq() {
     pump_tx();
 }
 
+// O quadro é indivisível: escrever só um pedaço dele no anel põe lixo na linha
+// e o host perde o sincronismo até topar com o próximo 0xA5 0x5A. Sem espaço
+// para o quadro inteiro, nada entra — descarta-se o quadro completo e conta-se
+// o erro, que sobe no STATUS. Não se emite evento aqui: o evento também é um
+// quadro, cairia no mesmo anel cheio e voltaria por este caminho.
 void queue_tx(const uint8_t* data, size_t len) {
+    // tx_tail só anda para frente (a ISR drena), logo uma leitura desatualizada
+    // subestima o espaço livre — o erro cai para o lado seguro. Um slot fica
+    // sempre vago para distinguir anel cheio de anel vazio: cabem RING_MASK.
+    const size_t used = (tx_head - tx_tail) & RING_MASK;
+    if (len > RING_MASK - used) {
+        error_count++;
+        pump_tx_locked();
+        return;
+    }
     for (size_t i = 0; i < len; ++i) {
-        size_t next = (tx_head + 1) & RING_MASK;
-        if (next == tx_tail) break; // TX ring full: drop remainder (frames are far smaller than 512B)
         tx_buf[tx_head] = data[i];
-        tx_head = next;
+        tx_head = (tx_head + 1) & RING_MASK;
     }
     pump_tx_locked();
 }
