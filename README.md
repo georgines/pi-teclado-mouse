@@ -277,6 +277,25 @@ uma máquina desligada (≈500 ms), força o desligamento de uma travada (≈600
 ou reinicia (≈200 ms no contato 2). `CONTACT_DOWN`/`CONTACT_UP` fecham e abrem
 sem temporizador.
 
+Dois fatos que quem escreve o host precisa conhecer, medidos com analisador
+lógico nos quatro pinos:
+
+- **O pulso nunca dura mais que o pedido.** O desvio é sistemático para menos
+  — cerca de 1 ms, independente da duração — porque a base de tempo tem
+  resolução de 1 ms e trunca: o fim é marcado em `floor(instante) + duração`,
+  então a parte fracionária do instante de chegada se perde. Fica muito dentro
+  da tolerância declarada, e o erro cai para o lado seguro: um botão de força
+  segurado além do comandado seria pior que um segurado de menos.
+- **Contatos em rajada não fecham no mesmo instante.** Quatro comandos na mesma
+  drenagem da fila são aplicados em sequência, com cerca de 110 µs entre um e o
+  seguinte (≈330 µs entre o primeiro e o quarto), na ordem em que chegaram. É
+  bem menos que um milissegundo, mas não é zero: quem precisar de dois contatos
+  realmente simultâneos não consegue isso por dois comandos.
+
+Um `CONTACT_UP` sobre um `CONTACT_PULSE` em curso abre o contato na hora. Um
+`CONTACT_PULSE` novo sobre outro em curso reinicia a contagem sem soltar o
+contato no meio da troca — a linha fica fechada de ponta a ponta.
+
 Os comandos de contato **não exigem USB pronto**, e isso é deliberado: a
 máquina controlada desligada é exatamente o caso em que o host precisa fechar o
 contato de força, e com ela desligada não existe enumeração USB para esperar.
