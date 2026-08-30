@@ -39,6 +39,31 @@ integração de mais alto nível fala esse protocolo por fora.
   interrompe USB nem UART — o firmware segue operando sem tela.
 - O botão em GP6 tem debounce de 30 ms. Cada pressionamento alterna entre
   os modos absoluto e relativo do mouse.
+
+### O que a tela mostra
+
+Seis linhas, redesenhadas quando o estado muda:
+
+```text
+USB:MOUNTED REL
+err:0 - R -- A2
+MOD:00 K:000000000000
+vX:0 vY:0
+BTN:-----
+Wv:0 Wh:0
+```
+
+1. estado do enlace USB (`MOUNTED`, `SUSPEND` ou `DISCONN`) e o modo do mouse
+   (`REL` ou `ABS`);
+2. contador de erros da UART e os quatro contatos — `D` para a força, `R` para
+   o reset, `A1` e `A2` para os auxiliares. O rótulo aparece quando o contato
+   está fechado e vira traço da mesma largura quando aberto, para as colunas
+   não se deslocarem;
+3. modificadores e as seis teclas do relatório HID, em hexadecimal;
+4. posição do mouse: `X`/`Y` no modo absoluto, `vX`/`vY` acumulados no
+   relativo;
+5. botões do mouse, na ordem esquerdo, direito, meio, 4 e 5;
+6. últimos valores das rodas vertical e horizontal.
 - Os quatro contatos são botões momentâneos em paralelo com os do painel
   frontal da máquina controlada. O acionamento tem de ser **seco e isolado**
   (relé de sinal ou optoacoplador); o GPIO nunca vai direto ao header do
@@ -345,4 +370,6 @@ comandos.
 | `src/oled_display.*` | inicialização e desenho no SSD1306 (núcleo 1) |
 | `src/shared_state.*` | snapshot compartilhado entre núcleos |
 | `tests/test_uart_protocol.cpp` | testes de host do protocolo e do estado HID |
+| `tusb_config.h` | configuração da pilha TinyUSB |
+| `uart_echo_test.cpp` | diagnóstico de bancada da UART, alvo de build separado |
 | `docs/` | documentação de projeto e de investigações de bugs |
