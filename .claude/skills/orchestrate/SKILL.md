@@ -22,8 +22,10 @@ Proibido em todo o repositório:
   IA, agente, modelo, prompt, sessão ou "gerado por";
 * marcador de origem automática (`ponytail:`, `claude:`, `TODO(claude)`) —
   usar `TODO:` / `FIXME:` simples;
-* arquivo de trabalho de agente versionado (`agents/`, `.claude/RESUME.md`,
-  documentos de prompt).
+* arquivo de trabalho de agente no controle de versão (`agents/`,
+  `.claude/RESUME.md`, planos de tarefa, documentos de prompt). Esses arquivos
+  podem existir livremente na máquina de quem trabalha no projeto — o que não
+  podem é ser versionados. Mantê-los no `.gitignore`.
 
 Os arquivos de instrução (`AGENTS.md`, `CLAUDE.md`, `.claude/skills/`) existem
 para fazer cumprir esta regra e não podem, eles próprios, atribuir autoria a
