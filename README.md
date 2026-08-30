@@ -102,6 +102,16 @@ próprio firmware.
   Esse mesmo struct é reaproveitado como payload da resposta `STATUS` do
   protocolo UART.
 
+### Metas de desempenho
+
+- UART0 a 921600 baud; polling USB HID de 1 ms.
+- `ACK`/`NACK` normalmente em até 2 ms contados do quadro completo recebido.
+- Relatório HID submetido assim que o endpoint fica disponível. O `ACK`
+  significa comando aceito na fila — não confirmação de que o sistema
+  operacional da máquina alvo processou a tecla.
+- O redesenho do OLED não entra no caminho UART–USB: ele roda no núcleo 1, e
+  uma atualização de tela inteira não pode aumentar essa latência.
+
 O dispositivo USB expõe duas interfaces HID:
 
 1. **Teclado** (boot HID): modificadores + até seis teclas simultâneas
@@ -136,6 +146,12 @@ A5 5A | versão:u8 | tipo:u8 | sequência:u16 | tamanho:u16 | payload:0..64 | CR
   reiniciar a conexão.
 - RX e TX são servidos por interrupção, com buffers circulares de 512
   bytes cada. A fila interna de comandos pendentes tem 32 posições.
+- Resposta que não caiba INTEIRA no anel de transmissão é descartada
+  inteira, nunca pela metade, e conta no contador de erros do `STATUS`. Uma
+  rajada que encha a fila de 32 comandos pede mais resposta do que cabe nos
+  512 bytes: o host trata a resposta que não veio como timeout e repete o
+  comando, ao passo que meio quadro na linha o deixaria fora de sincronismo
+  até o próximo `A5 5A`.
 
 ### Comandos (host -> Pico)
 
@@ -163,6 +179,15 @@ Em `MOUSE_MOVE`, X/Y são interpretados como `i16` no modo relativo e como
 `KEY_DOWN`/`KEY_UP` aceitam qualquer usage HID, incluindo modificadores
 (`0xE0`-`0xE7`); reenviar o mesmo comando é idempotente. Tentar manter uma
 sétima tecla comum pressionada ao mesmo tempo resulta em NACK.
+
+Movimento e roda são carga de UM relatório HID, não nível mantido. Vários
+`MOUSE_MOVE` que caiam na mesma drenagem da fila **somam** — nenhum movimento
+é descartado — e o total sai num relatório só, saturando em `i16` em vez de
+dar a volta; o mesmo vale para `MOUSE_WHEEL` em `i8`. Enviado o relatório,
+delta e roda voltam a zero, então um `MOUSE_BUTTONS` logo em seguida não
+arrasta o ponteiro nem rola a tela de novo. No `STATUS`, ao contrário,
+`virtual_x`/`virtual_y` e o último valor da roda são registro de estado e
+sobrevivem ao envio — é o que a tela mostra.
 
 ### Teclas temporizadas (`0x14`, `0x15`)
 
@@ -198,6 +223,14 @@ hardware para ela.
 Uma entrada por alvo dentro de cada domínio (teclado, contatos). Um
 `KEY_HOLD`/`KEY_HAMMER` novo sobre um usage que já tem um em curso
 **substitui** o anterior e reinicia a contagem — não empilha.
+
+Se as seis vagas do teclado estiverem tomadas na hora em que um `KEY_HAMMER`
+for bater de novo, aquele toque se perde e a janela segue: volta a bater
+assim que uma vaga abrir e termina com a tecla solta de qualquer jeito. Não
+há como recusar — o `ACK` desse temporizador saiu no aceite, e não existe
+quadro de resposta para um toque individual. Encher as seis vagas durante a
+folga de um martelo é decisão do host, que vê as vagas em `keys[6]` no
+`STATUS`.
 
 #### Cancelamento
 
@@ -354,6 +387,28 @@ relógio de 32 bits. Não substitui teste em hardware real — o protocolo só p
 validado ponta a ponta com a UART física conectada e um host enviando
 comandos.
 
+### Critérios de aceitação em hardware
+
+Gate automático verde não prova que o firmware funciona na placa. O que se
+confere com a placa gravada, registrando o observado e não só "passou":
+
+1. compilação integral em C++17 com o Pico SDK 2.3.0, sem avisos;
+2. enumeração no Windows 10/11 como teclado e mouse, sem interface de
+   gamepad nem de controle multimídia;
+3. CRC inválido, timeout, ressincronização, versão errada, payload inválido e
+   fila cheia, cada um com a resposta prevista;
+4. tecla afundada e solta, modificadores, 6KRO e liberação de emergência;
+5. movimento relativo e absoluto, os cinco botões e as duas rodas;
+6. troca de modo pelo botão GP6 e por `SET_MOUSE_MODE`;
+7. reconexão e suspensão USB sem reproduzir comando antigo;
+8. display detectado em `0x3C` e em `0x3D`, e operação normal sem display
+   nenhum ligado;
+9. `KEY_HOLD`, `KEY_HAMMER` e `CONTACT_PULSE` dentro da tolerância de tempo
+   prometida acima;
+10. os quatro contatos fechando e abrindo o nível certo em GP18, GP19, GP20 e
+    GP4;
+11. redesenho completo do OLED sem aumentar a latência do caminho UART–USB.
+
 ## Estrutura do projeto
 
 | Caminho | Conteúdo |
@@ -372,4 +427,7 @@ comandos.
 | `tests/test_uart_protocol.cpp` | testes de host do protocolo e do estado HID |
 | `tusb_config.h` | configuração da pilha TinyUSB |
 | `uart_echo_test.cpp` | diagnóstico de bancada da UART, alvo de build separado |
-| `docs/` | documentação de projeto e de investigações de bugs |
+| `CMakeLists.txt` | alvos de build e ligação com SDK, TinyUSB e u8g2pico |
+| `pico_sdk_import.cmake` | localização do Pico SDK, importado pelo CMake |
+| `lib/u8g2pico/` | u8g2 e sua integração com o Pico SDK, vendorizadas; os commits ficam fixados em `lib/u8g2pico/VENDOR_COMMIT.txt` |
+| `docs/` | investigações de bugs já encerradas, mantidas como histórico |

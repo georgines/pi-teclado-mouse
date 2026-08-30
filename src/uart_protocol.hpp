@@ -108,6 +108,7 @@ private:
 // Builds a complete wire frame (sync + header + payload + crc) into `out`.
 // `out` must have room for 10 + len bytes. Returns the frame length.
 size_t encode_frame(uint8_t* out, uint8_t type, uint16_t seq, const uint8_t* payload, uint16_t len);
-size_t encode_ack_nack(uint8_t* out, RespType type, uint16_t seq, ErrCode err_if_nack);
+size_t encode_ack(uint8_t* out, uint16_t seq);
+size_t encode_nack(uint8_t* out, uint16_t seq, ErrCode err);
 size_t encode_event(uint8_t* out, const uint8_t* payload, uint16_t len);
 size_t encode_status(uint8_t* out, uint16_t seq, const uint8_t* payload, uint16_t len);

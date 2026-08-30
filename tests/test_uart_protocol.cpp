@@ -92,7 +92,7 @@ static void test_parser_timeout() {
 
 static void test_encode_decode_roundtrip() {
     uint8_t buf[16];
-    size_t n = encode_ack_nack(buf, RespType::Ack, 99, ErrCode::Crc);
+    size_t n = encode_ack(buf, 99);
     FrameParser p;
     ParseResult r = ParseResult::NeedMoreData;
     for (size_t i = 0; i < n; ++i) r = p.feed_byte(buf[i], 0);
@@ -101,7 +101,7 @@ static void test_encode_decode_roundtrip() {
     assert(p.frame().seq == 99);
     assert(p.frame().len == 0);
 
-    n = encode_ack_nack(buf, RespType::Nack, 100, ErrCode::TooManyKeys);
+    n = encode_nack(buf, 100, ErrCode::TooManyKeys);
     p.reset();
     for (size_t i = 0; i < n; ++i) r = p.feed_byte(buf[i], 0);
     assert(r == ParseResult::FrameReady);
