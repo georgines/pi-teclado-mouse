@@ -136,6 +136,12 @@ A5 5A | versão:u8 | tipo:u8 | sequência:u16 | tamanho:u16 | payload:0..64 | CR
   reiniciar a conexão.
 - RX e TX são servidos por interrupção, com buffers circulares de 512
   bytes cada. A fila interna de comandos pendentes tem 32 posições.
+- Resposta que não caiba INTEIRA no anel de transmissão é descartada
+  inteira, nunca pela metade, e conta no contador de erros do `STATUS`. Uma
+  rajada que encha a fila de 32 comandos pede mais resposta do que cabe nos
+  512 bytes: o host trata a resposta que não veio como timeout e repete o
+  comando, ao passo que meio quadro na linha o deixaria fora de sincronismo
+  até o próximo `A5 5A`.
 
 ### Comandos (host -> Pico)
 
@@ -163,6 +169,15 @@ Em `MOUSE_MOVE`, X/Y são interpretados como `i16` no modo relativo e como
 `KEY_DOWN`/`KEY_UP` aceitam qualquer usage HID, incluindo modificadores
 (`0xE0`-`0xE7`); reenviar o mesmo comando é idempotente. Tentar manter uma
 sétima tecla comum pressionada ao mesmo tempo resulta em NACK.
+
+Movimento e roda são carga de UM relatório HID, não nível mantido. Vários
+`MOUSE_MOVE` que caiam na mesma drenagem da fila **somam** — nenhum movimento
+é descartado — e o total sai num relatório só, saturando em `i16` em vez de
+dar a volta; o mesmo vale para `MOUSE_WHEEL` em `i8`. Enviado o relatório,
+delta e roda voltam a zero, então um `MOUSE_BUTTONS` logo em seguida não
+arrasta o ponteiro nem rola a tela de novo. No `STATUS`, ao contrário,
+`virtual_x`/`virtual_y` e o último valor da roda são registro de estado e
+sobrevivem ao envio — é o que a tela mostra.
 
 ### Teclas temporizadas (`0x14`, `0x15`)
 
@@ -198,6 +213,14 @@ hardware para ela.
 Uma entrada por alvo dentro de cada domínio (teclado, contatos). Um
 `KEY_HOLD`/`KEY_HAMMER` novo sobre um usage que já tem um em curso
 **substitui** o anterior e reinicia a contagem — não empilha.
+
+Se as seis vagas do teclado estiverem tomadas na hora em que um `KEY_HAMMER`
+for bater de novo, aquele toque se perde e a janela segue: volta a bater
+assim que uma vaga abrir e termina com a tecla solta de qualquer jeito. Não
+há como recusar — o `ACK` desse temporizador saiu no aceite, e não existe
+quadro de resposta para um toque individual. Encher as seis vagas durante a
+folga de um martelo é decisão do host, que vê as vagas em `keys[6]` no
+`STATUS`.
 
 #### Cancelamento
 
