@@ -371,7 +371,8 @@ VERIFY = VERIFY_APPROVED
 
 ### Atualizar Graphify (condicional)
 
-Se `graphify-out/graph.json` existir, atualizar o grafo antes de abrir o PR:
+Se `graphify-out/graph.json` existir, atualizar o grafo antes de fechar a
+branch:
 
 ```bash
 graphify update .
@@ -382,22 +383,26 @@ Sem grafo no repositório, pular este passo.
 
 ### Entrega
 
-Seguindo a skill `/git-flow` — `main` e `develop` são protegidas, a
-entrega é por PR contra `develop`:
+Seguindo a skill `/git-flow`, a entrega é o merge da branch da tarefa para
+`develop`:
 
 1. garantir que todas as alterações da tarefa estejam commitadas e que
    `build/` não entrou no commit;
-2. `git push -u origin <branch-da-tarefa>`;
-3. abrir o PR contra `develop`, informando os gates executados e o resultado da
-   verificação em hardware.
+2. rodar os gates aplicáveis;
+3. merge `--no-ff` para `develop` e apagar a branch da tarefa.
 
 ```bash
 git status
-git push -u origin <branch-da-tarefa>
-gh pr create --base develop --fill
+git switch develop
+git merge --no-ff <branch-da-tarefa> -m "merge: <resumo da tarefa>"
+git branch -d <branch-da-tarefa>
 ```
 
-Nunca fazer merge direto em `main` ou `develop` pela linha de comando.
+O relatório da tarefa informa os gates executados e o resultado da verificação
+em hardware — inclusive o que ficou por verificar.
+
+`git push`, Pull Request e qualquer atualização de `main` são do autor do
+repositório. `main` nunca recebe commit direto nem merge local.
 
 Se houver conflito com `main`:
 
