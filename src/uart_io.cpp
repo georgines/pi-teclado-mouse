@@ -42,6 +42,30 @@ UsbLinkState usb_state = UsbLinkState::Disconnected;
 uint16_t error_count = 0;
 bool last_oled_ok = true;
 
+// Drena o anel de transmissão para a FIFO do UART e deixa a interrupção de TX
+// ligada apenas enquanto sobrar byte no anel.
+//
+// A interrupção de transmissão do PL011 só é gerada quando o nível da FIFO
+// CRUZA o limiar de disparo, de cima para baixo. Habilitá-la com a FIFO vazia
+// não produz cruzamento nenhum: a interrupção nunca chega, o anel nunca é
+// drenado e a transmissão trava para sempre. Por isso quem enfileira escreve
+// na FIFO aqui mesmo, em vez de esperar por uma interrupção que não viria.
+void pump_tx() {
+    while (uart_is_writable(UART_ID) && tx_tail != tx_head) {
+        uart_putc_raw(UART_ID, static_cast<char>(tx_buf[tx_tail]));
+        tx_tail = (tx_tail + 1) & RING_MASK;
+    }
+    uart_set_irq_enables(UART_ID, true, tx_tail != tx_head);
+}
+
+// pump_tx() a partir do laço principal. tx_tail também é escrito pela ISR, daí
+// o mascaramento.
+void pump_tx_locked() {
+    irq_set_enabled(UART0_IRQ, false);
+    pump_tx();
+    irq_set_enabled(UART0_IRQ, true);
+}
+
 void on_uart_irq() {
     while (uart_is_readable(UART_ID)) {
         uint8_t b = static_cast<uint8_t>(uart_getc(UART_ID));
@@ -53,13 +77,7 @@ void on_uart_irq() {
             rx_overflow = true; // ring full: drop the byte, poll() reports it
         }
     }
-    while (uart_is_writable(UART_ID) && tx_tail != tx_head) {
-        uart_putc_raw(UART_ID, static_cast<char>(tx_buf[tx_tail]));
-        tx_tail = (tx_tail + 1) & RING_MASK;
-    }
-    if (tx_tail == tx_head) {
-        uart_set_irq_enables(UART_ID, true, false); // nothing left: stop TX-empty IRQ storm
-    }
+    pump_tx();
 }
 
 void queue_tx(const uint8_t* data, size_t len) {
@@ -69,7 +87,7 @@ void queue_tx(const uint8_t* data, size_t len) {
         tx_buf[tx_head] = data[i];
         tx_head = next;
     }
-    uart_set_irq_enables(UART_ID, true, true);
+    pump_tx_locked();
 }
 
 void send_ack(uint16_t seq) {
@@ -270,6 +288,10 @@ void init() {
 }
 
 void poll(uint32_t now_ms) {
+    // Se um quadro sobrou no anel sem ninguém enfileirar mais nada, ele sai
+    // aqui em vez de esperar a próxima resposta.
+    pump_tx_locked();
+
     while (rx_tail != rx_head) {
         uint8_t b = rx_buf[rx_tail];
         rx_tail = (rx_tail + 1) & RING_MASK;
