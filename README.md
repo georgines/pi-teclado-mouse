@@ -102,6 +102,16 @@ próprio firmware.
   Esse mesmo struct é reaproveitado como payload da resposta `STATUS` do
   protocolo UART.
 
+### Metas de desempenho
+
+- UART0 a 921600 baud; polling USB HID de 1 ms.
+- `ACK`/`NACK` normalmente em até 2 ms contados do quadro completo recebido.
+- Relatório HID submetido assim que o endpoint fica disponível. O `ACK`
+  significa comando aceito na fila — não confirmação de que o sistema
+  operacional da máquina alvo processou a tecla.
+- O redesenho do OLED não entra no caminho UART–USB: ele roda no núcleo 1, e
+  uma atualização de tela inteira não pode aumentar essa latência.
+
 O dispositivo USB expõe duas interfaces HID:
 
 1. **Teclado** (boot HID): modificadores + até seis teclas simultâneas
@@ -377,6 +387,28 @@ relógio de 32 bits. Não substitui teste em hardware real — o protocolo só p
 validado ponta a ponta com a UART física conectada e um host enviando
 comandos.
 
+### Critérios de aceitação em hardware
+
+Gate automático verde não prova que o firmware funciona na placa. O que se
+confere com a placa gravada, registrando o observado e não só "passou":
+
+1. compilação integral em C++17 com o Pico SDK 2.3.0, sem avisos;
+2. enumeração no Windows 10/11 como teclado e mouse, sem interface de
+   gamepad nem de controle multimídia;
+3. CRC inválido, timeout, ressincronização, versão errada, payload inválido e
+   fila cheia, cada um com a resposta prevista;
+4. tecla afundada e solta, modificadores, 6KRO e liberação de emergência;
+5. movimento relativo e absoluto, os cinco botões e as duas rodas;
+6. troca de modo pelo botão GP6 e por `SET_MOUSE_MODE`;
+7. reconexão e suspensão USB sem reproduzir comando antigo;
+8. display detectado em `0x3C` e em `0x3D`, e operação normal sem display
+   nenhum ligado;
+9. `KEY_HOLD`, `KEY_HAMMER` e `CONTACT_PULSE` dentro da tolerância de tempo
+   prometida acima;
+10. os quatro contatos fechando e abrindo o nível certo em GP18, GP19, GP20 e
+    GP4;
+11. redesenho completo do OLED sem aumentar a latência do caminho UART–USB.
+
 ## Estrutura do projeto
 
 | Caminho | Conteúdo |
@@ -395,4 +427,7 @@ comandos.
 | `tests/test_uart_protocol.cpp` | testes de host do protocolo e do estado HID |
 | `tusb_config.h` | configuração da pilha TinyUSB |
 | `uart_echo_test.cpp` | diagnóstico de bancada da UART, alvo de build separado |
-| `docs/` | documentação de projeto e de investigações de bugs |
+| `CMakeLists.txt` | alvos de build e ligação com SDK, TinyUSB e u8g2pico |
+| `pico_sdk_import.cmake` | localização do Pico SDK, importado pelo CMake |
+| `lib/u8g2pico/` | u8g2 e sua integração com o Pico SDK, vendorizadas; os commits ficam fixados em `lib/u8g2pico/VENDOR_COMMIT.txt` |
+| `docs/` | investigações de bugs já encerradas, mantidas como histórico |
