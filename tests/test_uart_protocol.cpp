@@ -1,11 +1,12 @@
 // Host-only pure-logic check (no Pico SDK needed).
-// Build & run: g++ -std=c++17 -Isrc tests/test_uart_protocol.cpp src/uart_protocol.cpp src/hid_state.cpp -o /tmp/t && /tmp/t
+// Build & run: g++ -std=c++17 -Isrc tests/test_uart_protocol.cpp src/uart_protocol.cpp src/hid_state.cpp src/timed_actions.cpp -o /tmp/t && /tmp/t
 #include <cassert>
 #include <cstdio>
 #include <vector>
 #include "../src/crc16.hpp"
 #include "../src/uart_protocol.hpp"
 #include "../src/hid_state.hpp"
+#include "../src/timed_actions.hpp"
 
 static void test_crc16_known_vector() {
     const uint8_t data[] = "123456789";
@@ -91,7 +92,7 @@ static void test_parser_timeout() {
 
 static void test_encode_decode_roundtrip() {
     uint8_t buf[16];
-    size_t n = encode_ack_nack(buf, RespType::Ack, 99, ErrCode::Crc);
+    size_t n = encode_ack(buf, 99);
     FrameParser p;
     ParseResult r = ParseResult::NeedMoreData;
     for (size_t i = 0; i < n; ++i) r = p.feed_byte(buf[i], 0);
@@ -100,7 +101,7 @@ static void test_encode_decode_roundtrip() {
     assert(p.frame().seq == 99);
     assert(p.frame().len == 0);
 
-    n = encode_ack_nack(buf, RespType::Nack, 100, ErrCode::TooManyKeys);
+    n = encode_nack(buf, 100, ErrCode::TooManyKeys);
     p.reset();
     for (size_t i = 0; i < n; ++i) r = p.feed_byte(buf[i], 0);
     assert(r == ParseResult::FrameReady);
@@ -149,6 +150,42 @@ static void test_mouse_mode_switch_neutral() {
     assert(m.rel_dx == 0 && m.rel_dy == 0);
 }
 
+static void test_mouse_delta_acumula_ate_o_envio() {
+    MouseState m;
+    m.move_relative(10, 5);
+    m.move_relative(3, -2);
+    // A fila drena até 32 comandos por volta do laço e só um relatório HID sai:
+    // sem acumular, o primeiro movimento sumiria.
+    assert(m.rel_dx == 13 && m.rel_dy == 3);
+    assert(m.virtual_x == 13 && m.virtual_y == 3); // e bate com a posição virtual
+    m.consume_report();
+    assert(m.rel_dx == 0 && m.rel_dy == 0);        // relatório enviado zera o delta
+    assert(m.virtual_x == 13 && m.virtual_y == 3); // a posição virtual não é de um relatório só
+}
+
+static void test_roda_nao_rola_de_novo_no_relatorio_seguinte() {
+    MouseState m;
+    m.set_wheel(3, -1);
+    assert(m.pending_wheel_v == 3 && m.pending_wheel_h == -1);
+    m.consume_report();
+    // Um MOUSE_BUTTONS logo depois monta outro relatório: a roda não pode ir junto.
+    assert(m.pending_wheel_v == 0 && m.pending_wheel_h == 0);
+    assert(m.last_wheel_v == 3 && m.last_wheel_h == -1); // o STATUS guarda o último valor
+}
+
+static void test_acumulo_do_mouse_satura() {
+    MouseState m;
+    for (int i = 0; i < 5; ++i) m.move_relative(32767, -32768);
+    assert(m.rel_dx == 32767 && m.rel_dy == -32768); // gruda no extremo, não dá a volta
+    m.consume_report();
+    m.virtual_x = INT32_MAX - 1;
+    m.move_relative(100, 0);
+    assert(m.virtual_x == INT32_MAX);
+    m.set_wheel(100, 0);
+    m.set_wheel(100, 0);
+    assert(m.pending_wheel_v == INT8_MAX);
+}
+
 static void test_mouse_buttons_reject_invalid_bits() {
     MouseState m;
     assert(!m.set_buttons(0xE0));
@@ -165,6 +202,94 @@ static void test_mouse_absolute_range() {
     assert(m.abs_x == 32767); // unchanged on rejection
 }
 
+// --- tabela de ações temporizadas ---
+
+static void test_hold_solta_sozinho() {
+    TimedActions t;
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    assert(t.schedule_key_hold(0x28, 3000, 1000));
+    assert(t.active_count() == 1);
+    assert(t.tick(2000, evs, MAX_TIMED_ACTIONS) == 0); // dentro da janela
+    assert(t.active_count() == 1);
+    size_t n = t.tick(4000, evs, MAX_TIMED_ACTIONS);
+    assert(n == 1 && !evs[0].press && evs[0].target == 0x28);
+    assert(t.active_count() == 0);
+    assert(t.tick(9000, evs, MAX_TIMED_ACTIONS) == 0); // não repete
+}
+
+static void test_hammer_alterna_e_termina_solto() {
+    TimedActions t;
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    assert(t.schedule_key_hammer(0x52, 1000, 200, 0)); // meio período 100ms
+    assert(t.tick(100, evs, MAX_TIMED_ACTIONS) == 1 && !evs[0].press); // solta
+    assert(t.tick(200, evs, MAX_TIMED_ACTIONS) == 1 && evs[0].press);  // afunda de novo
+    size_t n = t.tick(1000, evs, MAX_TIMED_ACTIONS);
+    assert(n == 1 && !evs[0].press); // fim da janela com a tecla solta
+    assert(t.active_count() == 0);
+}
+
+static void test_substitui_em_vez_de_empilhar() {
+    TimedActions t;
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    assert(t.schedule_key_hold(0x04, 1000, 0));
+    assert(t.schedule_key_hold(0x04, 5000, 0)); // mesmo usage: substitui
+    assert(t.active_count() == 1);
+    assert(t.tick(1500, evs, MAX_TIMED_ACTIONS) == 0); // contagem reiniciada
+    assert(t.tick(5000, evs, MAX_TIMED_ACTIONS) == 1);
+}
+
+static void test_tabela_cheia_recusa_a_decima_primeira() {
+    TimedActions t;
+    for (uint8_t i = 0; i < MAX_TIMED_ACTIONS; ++i) {
+        assert(t.schedule_key_hold(static_cast<uint8_t>(0x04 + i), 1000, 0));
+    }
+    assert(!t.schedule_key_hold(0x50, 1000, 0)); // décima primeira
+    assert(t.active_count() == MAX_TIMED_ACTIONS); // as dez vigentes intactas
+}
+
+static void test_teclado_e_contatos_dividem_a_tabela() {
+    TimedActions t;
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    assert(t.schedule_key_hold(0x04, 1000, 0));
+    assert(t.schedule_contact_pulse(1, 500, 0));
+    assert(t.active_count() == 2);
+    // Mesmo número de alvo em domínios diferentes não colide.
+    assert(t.schedule_key_hold(1, 1000, 0));
+    assert(t.active_count() == 3);
+    size_t n = t.tick(500, evs, MAX_TIMED_ACTIONS);
+    assert(n == 1 && evs[0].kind == TimedKind::ContactPulse && evs[0].target == 1 && !evs[0].press);
+}
+
+static void test_cancelamentos_soltam_o_alvo() {
+    TimedActions t;
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    assert(t.schedule_key_hold(0x04, 5000, 0));
+    assert(t.schedule_key_hold(0x05, 5000, 0));
+    assert(t.schedule_contact_pulse(1, 5000, 0));
+
+    size_t n = t.cancel_key(0x04, evs, MAX_TIMED_ACTIONS);
+    assert(n == 1 && evs[0].target == 0x04 && !evs[0].press);
+    assert(!t.has_key(0x04) && t.has_key(0x05));
+
+    n = t.cancel_keys(evs, MAX_TIMED_ACTIONS);
+    assert(n == 1 && evs[0].target == 0x05);
+    assert(t.active_count() == 1); // o contato sobrevive ao release_all do teclado
+
+    n = t.cancel_all(evs, MAX_TIMED_ACTIONS);
+    assert(n == 1 && evs[0].kind == TimedKind::ContactPulse && !evs[0].press);
+    assert(t.active_count() == 0);
+    assert(t.tick(6000, evs, MAX_TIMED_ACTIONS) == 0); // nada é reproduzido depois
+}
+
+static void test_relogio_da_a_volta() {
+    TimedActions t;
+    TimedEvent evs[MAX_TIMED_ACTIONS];
+    const uint32_t quase_fim = 0xFFFFFF00u;
+    assert(t.schedule_key_hold(0x28, 1000, quase_fim)); // vence depois do wrap
+    assert(t.tick(quase_fim + 500, evs, MAX_TIMED_ACTIONS) == 0);
+    assert(t.tick(static_cast<uint32_t>(quase_fim + 1000), evs, MAX_TIMED_ACTIONS) == 1);
+}
+
 int main() {
     test_crc16_known_vector();
     test_parser_valid_ping();
@@ -178,8 +303,18 @@ int main() {
     test_keyboard_idempotent();
     test_keyboard_modifiers();
     test_mouse_mode_switch_neutral();
+    test_mouse_delta_acumula_ate_o_envio();
+    test_roda_nao_rola_de_novo_no_relatorio_seguinte();
+    test_acumulo_do_mouse_satura();
     test_mouse_buttons_reject_invalid_bits();
     test_mouse_absolute_range();
+    test_hold_solta_sozinho();
+    test_hammer_alterna_e_termina_solto();
+    test_substitui_em_vez_de_empilhar();
+    test_tabela_cheia_recusa_a_decima_primeira();
+    test_teclado_e_contatos_dividem_a_tabela();
+    test_cancelamentos_soltam_o_alvo();
+    test_relogio_da_a_volta();
     std::printf("all tests passed\n");
     return 0;
 }

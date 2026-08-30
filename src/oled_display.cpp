@@ -1,5 +1,6 @@
 #include "oled_display.hpp"
 #include "shared_state.hpp"
+#include "contacts.hpp"
 #include "u8g2pico.h"
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
@@ -22,7 +23,7 @@ bool probe_address(uint8_t addr) {
     return i2c_write_blocking(i2c1, addr, &probe, 1, false) >= 0;
 }
 
-void render(const DeviceSnapshot& s) {
+void render(const DeviceSnapshot& s, uint8_t contacts_bm) {
     char line[24];
     u8g2_ClearBuffer(&u8g2);
     u8g2_SetFont(&u8g2, u8g2_font_6x10_tf);
@@ -35,7 +36,13 @@ void render(const DeviceSnapshot& s) {
     snprintf(line, sizeof(line), "USB:%s %s", usb_str, mode_str);
     u8g2_DrawStr(&u8g2, 0, 8, line);
 
-    snprintf(line, sizeof(line), "UART err:%u", s.uart_error_count);
+    // Contatos pelo que são, não pelo índice: D (força), R (reset) e os dois
+    // auxiliares. Rótulo quando fechado, traço da mesma largura quando aberto,
+    // para a leitura não dançar. No pior caso — erro em 65535 e os quatro
+    // fechados — dá 19 dos 21 caracteres da linha na fonte 6x10.
+    snprintf(line, sizeof(line), "err:%u %s %s %s %s", s.uart_error_count,
+             (contacts_bm & 0x01) ? "D" : "-", (contacts_bm & 0x02) ? "R" : "-",
+             (contacts_bm & 0x04) ? "A1" : "--", (contacts_bm & 0x08) ? "A2" : "--");
     u8g2_DrawStr(&u8g2, 0, 18, line);
 
     snprintf(line, sizeof(line), "MOD:%02X K:%02X%02X%02X%02X%02X%02X", s.modifiers, s.keys[0], s.keys[1],
@@ -85,16 +92,24 @@ void core1_main() {
     u8g2_SetPowerSave(&u8g2, 0);
 
     DeviceSnapshot last{};
+    uint8_t last_contacts = 0;
     bool have_last = false;
     uint32_t last_draw_ms = 0;
 
     while (true) {
         DeviceSnapshot cur = shared_state_consume();
+        // Os contatos não cabem no DeviceSnapshot, que é contrato binário de 27
+        // bytes com o host. Lidos aqui direto do GPIO — os registradores são
+        // legíveis dos dois núcleos — e entram na detecção de mudança, senão a
+        // linha ficaria congelada: fechar um contato não altera o snapshot.
+        uint8_t cur_contacts = contacts::bitmap();
         uint32_t now = to_ms_since_boot(get_absolute_time());
-        bool changed = !have_last || memcmp(&cur, &last, sizeof(cur)) != 0;
+        bool changed = !have_last || cur_contacts != last_contacts ||
+                       memcmp(&cur, &last, sizeof(cur)) != 0;
         if (changed && (now - last_draw_ms) >= MIN_REDRAW_MS) {
-            render(cur);
+            render(cur, cur_contacts);
             last = cur;
+            last_contacts = cur_contacts;
             have_last = true;
             last_draw_ms = now;
         }

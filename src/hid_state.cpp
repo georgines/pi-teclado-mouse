@@ -5,6 +5,17 @@ MouseState g_mouse_state;
 
 static bool is_modifier(uint8_t usage) { return usage >= 0xE0 && usage <= 0xE7; }
 
+// Soma que gruda no extremo em vez de dar a volta. Os acumuladores têm largura
+// fixa (delta i16, posição virtual i32, roda i8) e estouro de inteiro com sinal
+// é comportamento indefinido em C++ — não é hipótese remota numa posição
+// virtual que só cresce enquanto o modo relativo estiver ativo. Saturar o host
+// lê como "acabou o curso"; dar a volta seria o ponteiro saltando para o lado
+// oposto da tela.
+static int64_t sat_add(int64_t acc, int64_t delta, int64_t lo, int64_t hi) {
+    int64_t r = acc + delta;
+    return r < lo ? lo : (r > hi ? hi : r);
+}
+
 bool KeyboardState::key_down(uint8_t usage) {
     if (is_modifier(usage)) {
         modifiers = static_cast<uint8_t>(modifiers | (1u << (usage - 0xE0)));
@@ -36,10 +47,14 @@ void KeyboardState::release_all() {
 }
 
 bool MouseState::move_relative(int16_t dx, int16_t dy) {
-    rel_dx = dx;
-    rel_dy = dy;
-    virtual_x += dx;
-    virtual_y += dy;
+    // Acumula: a fila drena até 32 comandos por volta do laço principal e só um
+    // relatório HID sai no fim dela. Substituir o delta jogaria fora todo
+    // movimento menos o último, e a posição virtual — que sempre somou todos —
+    // passaria a mentir sobre onde o ponteiro está.
+    rel_dx = static_cast<int16_t>(sat_add(rel_dx, dx, INT16_MIN, INT16_MAX));
+    rel_dy = static_cast<int16_t>(sat_add(rel_dy, dy, INT16_MIN, INT16_MAX));
+    virtual_x = static_cast<int32_t>(sat_add(virtual_x, dx, INT32_MIN, INT32_MAX));
+    virtual_y = static_cast<int32_t>(sat_add(virtual_y, dy, INT32_MIN, INT32_MAX));
     return true;
 }
 
@@ -59,6 +74,17 @@ bool MouseState::set_buttons(uint8_t bitmap) {
 void MouseState::set_wheel(int8_t v, int8_t h) {
     last_wheel_v = v;
     last_wheel_h = h;
+    // Mesma acumulação do movimento, e pela mesma razão: dois MOUSE_WHEEL na
+    // mesma drenagem viram um relatório só.
+    pending_wheel_v = static_cast<int8_t>(sat_add(pending_wheel_v, v, INT8_MIN, INT8_MAX));
+    pending_wheel_h = static_cast<int8_t>(sat_add(pending_wheel_h, h, INT8_MIN, INT8_MAX));
+}
+
+void MouseState::consume_report() {
+    rel_dx = 0;
+    rel_dy = 0;
+    pending_wheel_v = 0;
+    pending_wheel_h = 0;
 }
 
 void MouseState::release_all_buttons() {
@@ -68,8 +94,7 @@ void MouseState::release_all_buttons() {
 void MouseState::set_mode(MouseMode m) {
     mode = m;
     buttons = 0;
-    rel_dx = 0;
-    rel_dy = 0;
+    consume_report(); // nada da carga do modo anterior atravessa a troca
     if (m == MouseMode::Relative) {
         virtual_x = 0;
         virtual_y = 0;

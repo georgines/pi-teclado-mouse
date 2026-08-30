@@ -13,7 +13,7 @@ computador alvo — injete teclas e movimentos de mouse nesse computador,
 enviando comandos simples por UART para o Pico. O Pico atua como ponte:
 recebe pela UART, valida, e reproduz como HID nativo pela USB. Um display
 OLED opcional mostra o estado atual do dispositivo (conexão USB, modo do
-mouse, teclas pressionadas, contadores de erro) para depuração no bancada.
+mouse, teclas pressionadas, contadores de erro, contatos fechados) para depuração no bancada.
 
 Este firmware não inclui MCP nem integração direta com agentes de IA — a
 ponte é puramente o protocolo UART descrito neste documento; qualquer
@@ -28,6 +28,10 @@ integração de mais alto nível fala esse protocolo por fora.
 | OLED SDA | I2C1 | GP14 |
 | OLED SCL | I2C1 | GP15 |
 | Alternar modo ABS/REL | GPIO, pull-up interno, ativo em nível baixo | GP6 |
+| Contato 1 — POWER | GPIO saída, polaridade de compilação | GP18 |
+| Contato 2 — RESET | GPIO saída, polaridade de compilação | GP19 |
+| Contato 3 — auxiliar 1 | GPIO saída, polaridade de compilação | GP20 |
+| Contato 4 — auxiliar 2 | GPIO saída, polaridade de compilação | GP4 |
 
 - UART0 a 921600 baud, 8N1, sem controle de fluxo.
 - O display é um SSD1306 I2C de 128x64. O firmware sonda primeiro o
@@ -35,6 +39,58 @@ integração de mais alto nível fala esse protocolo por fora.
   interrompe USB nem UART — o firmware segue operando sem tela.
 - O botão em GP6 tem debounce de 30 ms. Cada pressionamento alterna entre
   os modos absoluto e relativo do mouse.
+
+### O que a tela mostra
+
+Seis linhas, redesenhadas quando o estado muda:
+
+```text
+USB:MOUNTED REL
+err:0 - R -- A2
+MOD:00 K:000000000000
+vX:0 vY:0
+BTN:-----
+Wv:0 Wh:0
+```
+
+1. estado do enlace USB (`MOUNTED`, `SUSPEND` ou `DISCONN`) e o modo do mouse
+   (`REL` ou `ABS`);
+2. contador de erros da UART e os quatro contatos — `D` para a força, `R` para
+   o reset, `A1` e `A2` para os auxiliares. O rótulo aparece quando o contato
+   está fechado e vira traço da mesma largura quando aberto, para as colunas
+   não se deslocarem;
+3. modificadores e as seis teclas do relatório HID, em hexadecimal;
+4. posição do mouse: `X`/`Y` no modo absoluto, `vX`/`vY` acumulados no
+   relativo;
+5. botões do mouse, na ordem esquerdo, direito, meio, 4 e 5;
+6. últimos valores das rodas vertical e horizontal.
+- Os quatro contatos são botões momentâneos em paralelo com os do painel
+  frontal da máquina controlada. O acionamento tem de ser **seco e isolado**
+  (relé de sinal ou optoacoplador); o GPIO nunca vai direto ao header do
+  painel, cuja polaridade não é garantida entre fabricantes.
+
+### Polaridade e estado de boot dos contatos
+
+Cada contato tem polaridade própria — ativo em nível ALTO (padrão) ou ativo
+em nível BAIXO — na tabela `ACTIVE_HIGH` de `src/contacts.hpp`. É escolha de
+**compilação**, não comando de UART: um contato precisa estar comprovadamente
+aberto ANTES de o host falar com a placa, e uma polaridade que só chegasse por
+comando não teria resposta para "qual era ela durante o boot".
+
+- `contacts::init()` é a primeira coisa que `main()` executa, antes de
+  `board_init()`, e leva os quatro contatos ao nível ABERTO.
+- Um reset do Pico com um contato fechado por `CONTACT_DOWN` termina com o
+  contato aberto: o contato não sobrevive ao firmware que o fechou.
+- Desconexão ou suspensão do USB abre todos os contatos e cancela os pulsos
+  pendentes; overflow de buffer ou de fila faz o mesmo.
+
+**Aviso — módulo de relé ativo em BAIXO é o caso perigoso.** O pino do Pico
+está em nível baixo enquanto o firmware não o configura, e nível baixo, nesse
+módulo, é o relé fechado: o botão de força afundado durante o boot da placa.
+Quem usar módulo ativo em baixo precisa garantir a abertura **no hardware**
+(pull-up externo no lado do módulo) e escolher relé ou optoacoplador cujo
+estado sem energia também seja aberto. Nenhuma linha de firmware roda antes do
+próprio firmware.
 
 ## Arquitetura
 
@@ -45,6 +101,16 @@ integração de mais alto nível fala esse protocolo por fora.
   (`DeviceSnapshot`, ver `src/shared_state.hpp`), com seção crítica curta.
   Esse mesmo struct é reaproveitado como payload da resposta `STATUS` do
   protocolo UART.
+
+### Metas de desempenho
+
+- UART0 a 921600 baud; polling USB HID de 1 ms.
+- `ACK`/`NACK` normalmente em até 2 ms contados do quadro completo recebido.
+- Relatório HID submetido assim que o endpoint fica disponível. O `ACK`
+  significa comando aceito na fila — não confirmação de que o sistema
+  operacional da máquina alvo processou a tecla.
+- O redesenho do OLED não entra no caminho UART–USB: ele roda no núcleo 1, e
+  uma atualização de tela inteira não pode aumentar essa latência.
 
 O dispositivo USB expõe duas interfaces HID:
 
@@ -80,6 +146,12 @@ A5 5A | versão:u8 | tipo:u8 | sequência:u16 | tamanho:u16 | payload:0..64 | CR
   reiniciar a conexão.
 - RX e TX são servidos por interrupção, com buffers circulares de 512
   bytes cada. A fila interna de comandos pendentes tem 32 posições.
+- Resposta que não caiba INTEIRA no anel de transmissão é descartada
+  inteira, nunca pela metade, e conta no contador de erros do `STATUS`. Uma
+  rajada que encha a fila de 32 comandos pede mais resposta do que cabe nos
+  512 bytes: o host trata a resposta que não veio como timeout e repete o
+  comando, ao passo que meio quadro na linha o deixaria fora de sincronismo
+  até o próximo `A5 5A`.
 
 ### Comandos (host -> Pico)
 
@@ -90,17 +162,151 @@ A5 5A | versão:u8 | tipo:u8 | sequência:u16 | tamanho:u16 | payload:0..64 | CR
 | `0x10` | `KEY_DOWN` | usage HID (`u8`) |
 | `0x11` | `KEY_UP` | usage HID (`u8`) |
 | `0x12` | `KEY_RELEASE_ALL` | vazio |
+| `0x14` | `KEY_HOLD` | usage HID (`u8`) + duração em ms (`u16`, 1..65535) |
+| `0x15` | `KEY_HAMMER` | usage HID (`u8`) + duração (`u16`) + intervalo (`u16`) |
 | `0x20` | `MOUSE_MOVE` | X (`u16`) + Y (`u16`) |
 | `0x21` | `MOUSE_BUTTONS` | bitmap dos cinco botões (`u8`) |
 | `0x22` | `MOUSE_WHEEL` | vertical (`i8`) + horizontal (`i8`) |
 | `0x23` | `MOUSE_RELEASE_ALL` | vazio |
 | `0x24` | `SET_MOUSE_MODE` | `0` = relativo, `1` = absoluto |
+| `0x30` | `CONTACT_PULSE` | contato (`u8`, 1..4) + duração em ms (`u16`, 1..65535) |
+| `0x31` | `CONTACT_DOWN` | contato (`u8`, 1..4) |
+| `0x32` | `CONTACT_UP` | contato (`u8`, 1..4) |
+| `0x33` | `GET_CONTACTS` | vazio |
 
 Em `MOUSE_MOVE`, X/Y são interpretados como `i16` no modo relativo e como
 `u16` no modo absoluto; valores absolutos acima de 32767 são rejeitados.
 `KEY_DOWN`/`KEY_UP` aceitam qualquer usage HID, incluindo modificadores
 (`0xE0`-`0xE7`); reenviar o mesmo comando é idempotente. Tentar manter uma
 sétima tecla comum pressionada ao mesmo tempo resulta em NACK.
+
+Movimento e roda são carga de UM relatório HID, não nível mantido. Vários
+`MOUSE_MOVE` que caiam na mesma drenagem da fila **somam** — nenhum movimento
+é descartado — e o total sai num relatório só, saturando em `i16` em vez de
+dar a volta; o mesmo vale para `MOUSE_WHEEL` em `i8`. Enviado o relatório,
+delta e roda voltam a zero, então um `MOUSE_BUTTONS` logo em seguida não
+arrasta o ponteiro nem rola a tela de novo. No `STATUS`, ao contrário,
+`virtual_x`/`virtual_y` e o último valor da roda são registro de estado e
+sobrevivem ao envio — é o que a tela mostra.
+
+### Teclas temporizadas (`0x14`, `0x15`)
+
+O toque avulso e o acorde (`Ctrl+C`, `Alt+F4`) se resolvem no host,
+empacotando `KEY_DOWN` e `KEY_UP` na mesma drenagem da fila — não precisam de
+comando novo. O que precisa do firmware é só o que envolve TEMPO, porque a
+porta serial é compartilhada entre teclado e mouse: esperar uma janela de 8
+segundos no host congelaria o mouse da mesma estação por 8 segundos.
+
+- `KEY_HOLD` afunda a tecla, conta o tempo sozinho e a solta.
+- `KEY_HAMMER` dá toques curtos espaçados pelo intervalo ao longo da duração,
+  e termina sempre com a tecla solta. Serve para entrar no setup do BIOS, no
+  menu de boot ou no GRUB.
+
+O `ACK` dos dois — e o de `CONTACT_PULSE` — sai ao **ACEITAR**, nunca ao
+terminar. Um `KEY_HOLD` de 3 s que só respondesse no fim estouraria o timeout
+do host, que trataria isso como cabo caído e descartaria a fila a cada tecla.
+
+`0x13 KEY_TAP` foi considerado e **recusado**: um toque atômico no firmware não
+resolve nada que o host já não resolva empacotando os dois eventos, e a 921600
+baud o par de quadros não é gargalo de nada. Comando novo sem defeito que o
+justifique é superfície de ataque e de manutenção de graça.
+
+#### Tabela de temporizadores
+
+`KEY_HOLD`, `KEY_HAMMER` e `CONTACT_PULSE` compartilham **uma** tabela fixa de
+**10 entradas** (`src/timed_actions.*`), varrida no laço principal do núcleo 0
+— nunca um `sleep` no caminho do parser. Dez é o máximo físico: seis teclas
+comuns simultâneas (o teclado é 6KRO) mais os quatro contatos do painel
+frontal; não cabe uma décima primeira intenção temporizada porque não existe
+hardware para ela.
+
+Uma entrada por alvo dentro de cada domínio (teclado, contatos). Um
+`KEY_HOLD`/`KEY_HAMMER` novo sobre um usage que já tem um em curso
+**substitui** o anterior e reinicia a contagem — não empilha.
+
+Se as seis vagas do teclado estiverem tomadas na hora em que um `KEY_HAMMER`
+for bater de novo, aquele toque se perde e a janela segue: volta a bater
+assim que uma vaga abrir e termina com a tecla solta de qualquer jeito. Não
+há como recusar — o `ACK` desse temporizador saiu no aceite, e não existe
+quadro de resposta para um toque individual. Encher as seis vagas durante a
+folga de um martelo é decisão do host, que vê as vagas em `keys[6]` no
+`STATUS`.
+
+#### Cancelamento
+
+Um temporizador pendente é uma tecla que vai ser afundada no FUTURO, numa
+máquina real, possivelmente depois que ninguém mais estiver no controle. Todo
+caminho de segurança termina também em "nenhum temporizador pendente":
+
+1. `KEY_RELEASE_ALL` cancela todos os temporizadores de teclado, além de
+   soltar as teclas.
+2. `KEY_UP` sobre um usage com `KEY_HOLD`/`KEY_HAMMER` em curso cancela aquele
+   temporizador.
+3. Desconexão, suspensão ou reinicialização do USB cancela todos os
+   temporizadores e abre todos os contatos.
+4. Overflow de buffer ou de fila cancela todos os temporizadores e abre todos
+   os contatos.
+5. `CONTACT_UP` cancela o pulso pendente daquele contato.
+
+Cancelar solta o alvo: nenhum caminho de cancelamento deixa tecla afundada ou
+contato fechado.
+
+#### Tolerância de tempo
+
+O firmware promete **±5 ms ou ±1% da duração, o que for maior**. O polling USB
+é de 1 ms e o núcleo 1 redesenha o OLED; prometer precisão melhor que isso
+seria mentira medida. Uma janela de BIOS é medida em segundos — não precisa
+melhor.
+
+#### O que não muda
+
+O payload do `STATUS` continua com 27 bytes. Uma tecla mantida por
+temporizador aparece em `keys[6]` e `modifiers` como qualquer outra, e isso é a
+verdade: do ponto de vista da máquina controlada não existe diferença entre uma
+tecla presa por um timer e uma presa por um dedo. Relatar temporizadores
+pendentes seria aumento de versão do protocolo.
+
+Não existe relatório de capacidades. O host descobre o suporte mandando o
+comando e lendo a resposta: `NACK` com erro `3` (comando desconhecido) é
+firmware antigo. A versão do quadro continua `1`.
+
+### Botões de energia (`0x30`..`0x33`)
+
+`CONTACT_PULSE` fecha o contato, conta a duração e o abre — é o pulso que liga
+uma máquina desligada (≈500 ms), força o desligamento de uma travada (≈6000 ms)
+ou reinicia (≈200 ms no contato 2). `CONTACT_DOWN`/`CONTACT_UP` fecham e abrem
+sem temporizador.
+
+Dois fatos que quem escreve o host precisa conhecer, medidos com analisador
+lógico nos quatro pinos:
+
+- **O pulso nunca dura mais que o pedido.** O desvio é sistemático para menos
+  — cerca de 1 ms, independente da duração — porque a base de tempo tem
+  resolução de 1 ms e trunca: o fim é marcado em `floor(instante) + duração`,
+  então a parte fracionária do instante de chegada se perde. Fica muito dentro
+  da tolerância declarada, e o erro cai para o lado seguro: um botão de força
+  segurado além do comandado seria pior que um segurado de menos.
+- **Contatos em rajada não fecham no mesmo instante.** Quatro comandos na mesma
+  drenagem da fila são aplicados em sequência, com cerca de 110 µs entre um e o
+  seguinte (≈330 µs entre o primeiro e o quarto), na ordem em que chegaram. É
+  bem menos que um milissegundo, mas não é zero: quem precisar de dois contatos
+  realmente simultâneos não consegue isso por dois comandos.
+
+Um `CONTACT_UP` sobre um `CONTACT_PULSE` em curso abre o contato na hora. Um
+`CONTACT_PULSE` novo sobre outro em curso reinicia a contagem sem soltar o
+contato no meio da troca — a linha fica fechada de ponta a ponta.
+
+Os comandos de contato **não exigem USB pronto**, e isso é deliberado: a
+máquina controlada desligada é exatamente o caso em que o host precisa fechar o
+contato de força, e com ela desligada não existe enumeração USB para esperar.
+`USB_NOT_READY` vale para os comandos de teclado e mouse.
+
+`GET_CONTACTS` responde `CONTACTS` (`0x83`) com **um** byte: bitmap dos quatro
+contatos, bit 0 = contato 1, `1` = fechado. O bitmap é o estado **elétrico**
+lido de volta dos pinos do Pico (`gpio_get` sobre a saída), não uma sombra da
+intenção do firmware — pega um pino que não assumiu o nível comandado. Ele não
+enxerga o outro lado do relé: um relé colado ou um cabo solto continua
+invisível daqui.
 
 ### Respostas e eventos (Pico -> host)
 
@@ -109,6 +315,7 @@ sétima tecla comum pressionada ao mesmo tempo resulta em NACK.
 | `0x80` | `ACK` | comando validado e aceito |
 | `0x81` | `NACK` | comando recusado, com código de erro |
 | `0x82` | `STATUS` | resposta a `GET_STATUS`, snapshot completo do estado |
+| `0x83` | `CONTACTS` | resposta a `GET_CONTACTS`, bitmap (`u8`) dos quatro contatos |
 | `0x90` | `EVENT_STATUS` | evento assíncrono, não solicitado pelo host |
 
 `ACK`/`NACK` reutilizam o número de sequência do comando que os originou.
@@ -130,6 +337,17 @@ Códigos de erro usados em `NACK` e em `EVENT_STATUS`:
 | `8` | Coordenada absoluta fora de faixa |
 | `9` | USB não conectado/pronto |
 | `10` | Timeout de quadro parcial |
+
+Nas faixas temporizada e de contatos, nenhum código de erro novo é usado:
+
+| Situação | NACK |
+|---|---|
+| Duração 0, ou intervalo 0, ou intervalo maior que a duração | `6` |
+| `KEY_HOLD`/`KEY_HAMMER` que exigiria a sétima tecla comum simultânea | `7` |
+| Tabela de temporizadores cheia | `5` |
+| USB desconectado ou suspenso (comandos de teclado e mouse) | `9` |
+| Payload de tamanho errado | `4` |
+| Contato fora de 1..4, ou duração de pulso fora de 1..65535 ms | `6` |
 
 `EVENT_STATUS` também é emitido, sem que o host peça, para: conexão,
 desconexão e suspensão USB; mudança de modo do mouse; falha e recuperação
@@ -175,14 +393,40 @@ Teste de unidade do parser de protocolo e da máquina de estado HID, sem
 depender de hardware:
 
 ```bash
-g++ -std=c++17 -Wall -Wextra -Isrc tests/test_uart_protocol.cpp src/uart_protocol.cpp src/hid_state.cpp -o /tmp/t && /tmp/t
+g++ -std=c++17 -Wall -Wextra -Isrc tests/test_uart_protocol.cpp \
+    src/uart_protocol.cpp src/hid_state.cpp src/timed_actions.cpp -o /tmp/t && /tmp/t
 ```
 
 Cobre CRC16, sincronismo/resincronização, timeout, validação de versão e
-tamanho, além de 6KRO, troca de modo e validação de botões/faixa absoluta
-do mouse. Não substitui teste em hardware real — o protocolo só pode ser
+tamanho, 6KRO, troca de modo e validação de botões/faixa absoluta do mouse, e
+a tabela de temporizadores: fim de janela, alternância do martelo,
+substituição em vez de empilhamento, recusa da décima primeira entrada,
+convivência de teclado e contatos na mesma tabela, cancelamentos e volta do
+relógio de 32 bits. Não substitui teste em hardware real — o protocolo só pode ser
 validado ponta a ponta com a UART física conectada e um host enviando
 comandos.
+
+### Critérios de aceitação em hardware
+
+Gate automático verde não prova que o firmware funciona na placa. O que se
+confere com a placa gravada, registrando o observado e não só "passou":
+
+1. compilação integral em C++17 com o Pico SDK 2.3.0, sem avisos;
+2. enumeração no Windows 10/11 como teclado e mouse, sem interface de
+   gamepad nem de controle multimídia;
+3. CRC inválido, timeout, ressincronização, versão errada, payload inválido e
+   fila cheia, cada um com a resposta prevista;
+4. tecla afundada e solta, modificadores, 6KRO e liberação de emergência;
+5. movimento relativo e absoluto, os cinco botões e as duas rodas;
+6. troca de modo pelo botão GP6 e por `SET_MOUSE_MODE`;
+7. reconexão e suspensão USB sem reproduzir comando antigo;
+8. display detectado em `0x3C` e em `0x3D`, e operação normal sem display
+   nenhum ligado;
+9. `KEY_HOLD`, `KEY_HAMMER` e `CONTACT_PULSE` dentro da tolerância de tempo
+   prometida acima;
+10. os quatro contatos fechando e abrindo o nível certo em GP18, GP19, GP20 e
+    GP4;
+11. redesenho completo do OLED sem aumentar a latência do caminho UART–USB.
 
 ## Estrutura do projeto
 
@@ -193,9 +437,16 @@ comandos.
 | `src/uart_protocol.*` | codec do quadro binário (parser + encoder), CRC16 |
 | `src/uart_io.*` | I/O da UART, fila de comandos, despacho, ACK/NACK/eventos |
 | `src/hid_state.*` | estado de teclado (6KRO) e mouse (botões, posição, modo) |
+| `src/timed_actions.*` | tabela fixa de 10 temporizadores (teclas mantidas/marteladas e pulsos de contato) |
+| `src/contacts.*` | quatro contatos secos do painel frontal, polaridade de compilação |
 | `src/hid_usb.*` | submissão dos relatórios HID à pilha TinyUSB |
 | `src/mode_button.*` | leitura debounced do botão de troca de modo (GP6) |
 | `src/oled_display.*` | inicialização e desenho no SSD1306 (núcleo 1) |
 | `src/shared_state.*` | snapshot compartilhado entre núcleos |
 | `tests/test_uart_protocol.cpp` | testes de host do protocolo e do estado HID |
-| `docs/` | documentação de projeto e de investigações de bugs |
+| `tusb_config.h` | configuração da pilha TinyUSB |
+| `uart_echo_test.cpp` | diagnóstico de bancada da UART, alvo de build separado |
+| `CMakeLists.txt` | alvos de build e ligação com SDK, TinyUSB e u8g2pico |
+| `pico_sdk_import.cmake` | localização do Pico SDK, importado pelo CMake |
+| `lib/u8g2pico/` | u8g2 e sua integração com o Pico SDK, vendorizadas; os commits ficam fixados em `lib/u8g2pico/VENDOR_COMMIT.txt` |
+| `docs/` | investigações de bugs já encerradas, mantidas como histórico |

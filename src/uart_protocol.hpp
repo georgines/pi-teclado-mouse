@@ -11,17 +11,24 @@ enum class CmdType : uint8_t {
     KeyDown = 0x10,
     KeyUp = 0x11,
     KeyReleaseAll = 0x12,
+    KeyHold = 0x14,
+    KeyHammer = 0x15,
     MouseMove = 0x20,
     MouseButtons = 0x21,
     MouseWheel = 0x22,
     MouseReleaseAll = 0x23,
     SetMouseMode = 0x24,
+    ContactPulse = 0x30,
+    ContactDown = 0x31,
+    ContactUp = 0x32,
+    GetContacts = 0x33,
 };
 
 enum class RespType : uint8_t {
     Ack = 0x80,
     Nack = 0x81,
     Status = 0x82,
+    Contacts = 0x83,
     EventStatus = 0x90,
 };
 
@@ -101,6 +108,7 @@ private:
 // Builds a complete wire frame (sync + header + payload + crc) into `out`.
 // `out` must have room for 10 + len bytes. Returns the frame length.
 size_t encode_frame(uint8_t* out, uint8_t type, uint16_t seq, const uint8_t* payload, uint16_t len);
-size_t encode_ack_nack(uint8_t* out, RespType type, uint16_t seq, ErrCode err_if_nack);
+size_t encode_ack(uint8_t* out, uint16_t seq);
+size_t encode_nack(uint8_t* out, uint16_t seq, ErrCode err);
 size_t encode_event(uint8_t* out, const uint8_t* payload, uint16_t len);
 size_t encode_status(uint8_t* out, uint16_t seq, const uint8_t* payload, uint16_t len);

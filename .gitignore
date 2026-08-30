@@ -1,2 +1,7 @@
 build
 !.vscode/*
+.claude/RESUME.md
+settings.local.json
+agents/
+prompt-*.md
+docs/superpowers/

@@ -53,6 +53,8 @@ target_sources(dev_hid_composite PUBLIC
         ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/uart_protocol.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/hid_state.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/timed_actions.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/contacts.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/shared_state.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/uart_io.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/mode_button.cpp
