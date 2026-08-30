@@ -115,14 +115,13 @@ size_t encode_frame(uint8_t* out, uint8_t type, uint16_t seq, const uint8_t* pay
     return static_cast<size_t>(10 + len);
 }
 
-size_t encode_ack_nack(uint8_t* out, RespType type, uint16_t seq, ErrCode err_if_nack) {
-    uint8_t payload[1];
-    uint16_t len = 0;
-    if (type == RespType::Nack) {
-        payload[0] = static_cast<uint8_t>(err_if_nack);
-        len = 1;
-    }
-    return encode_frame(out, static_cast<uint8_t>(type), seq, payload, len);
+size_t encode_ack(uint8_t* out, uint16_t seq) {
+    return encode_frame(out, static_cast<uint8_t>(RespType::Ack), seq, nullptr, 0);
+}
+
+size_t encode_nack(uint8_t* out, uint16_t seq, ErrCode err) {
+    const uint8_t payload[1] = {static_cast<uint8_t>(err)};
+    return encode_frame(out, static_cast<uint8_t>(RespType::Nack), seq, payload, 1);
 }
 
 size_t encode_event(uint8_t* out, const uint8_t* payload, uint16_t len) {

@@ -106,12 +106,12 @@ void queue_tx(const uint8_t* data, size_t len) {
 
 void send_ack(uint16_t seq) {
     uint8_t buf[10];
-    queue_tx(buf, encode_ack_nack(buf, RespType::Ack, seq, ErrCode::Crc));
+    queue_tx(buf, encode_ack(buf, seq));
 }
 
 void send_nack(uint16_t seq, ErrCode err) {
     uint8_t buf[11];
-    queue_tx(buf, encode_ack_nack(buf, RespType::Nack, seq, err));
+    queue_tx(buf, encode_nack(buf, seq, err));
 }
 
 void emit_event1(EventCode code) {
@@ -157,6 +157,12 @@ void apply_timed_events(const TimedEvent* evs, size_t n) {
             continue;
         }
         if (evs[i].press) {
+            // Retorno ignorado de propósito: as seis vagas do teclado podem ter
+            // sido tomadas por KEY_DOWN do host durante a folga de um martelo.
+            // Aquele toque se perde e a janela segue — volta a bater assim que
+            // uma vaga abrir, e termina solta de qualquer jeito, porque key_up()
+            // sobre tecla que não está afundada é inócuo. Recusar aqui não teria
+            // para onde ir: o ACK desse temporizador saiu lá atrás, no aceite.
             g_keyboard_state.key_down(evs[i].target);
         } else {
             g_keyboard_state.key_up(evs[i].target);
