@@ -150,6 +150,42 @@ static void test_mouse_mode_switch_neutral() {
     assert(m.rel_dx == 0 && m.rel_dy == 0);
 }
 
+static void test_mouse_delta_acumula_ate_o_envio() {
+    MouseState m;
+    m.move_relative(10, 5);
+    m.move_relative(3, -2);
+    // A fila drena até 32 comandos por volta do laço e só um relatório HID sai:
+    // sem acumular, o primeiro movimento sumiria.
+    assert(m.rel_dx == 13 && m.rel_dy == 3);
+    assert(m.virtual_x == 13 && m.virtual_y == 3); // e bate com a posição virtual
+    m.consume_report();
+    assert(m.rel_dx == 0 && m.rel_dy == 0);        // relatório enviado zera o delta
+    assert(m.virtual_x == 13 && m.virtual_y == 3); // a posição virtual não é de um relatório só
+}
+
+static void test_roda_nao_rola_de_novo_no_relatorio_seguinte() {
+    MouseState m;
+    m.set_wheel(3, -1);
+    assert(m.pending_wheel_v == 3 && m.pending_wheel_h == -1);
+    m.consume_report();
+    // Um MOUSE_BUTTONS logo depois monta outro relatório: a roda não pode ir junto.
+    assert(m.pending_wheel_v == 0 && m.pending_wheel_h == 0);
+    assert(m.last_wheel_v == 3 && m.last_wheel_h == -1); // o STATUS guarda o último valor
+}
+
+static void test_acumulo_do_mouse_satura() {
+    MouseState m;
+    for (int i = 0; i < 5; ++i) m.move_relative(32767, -32768);
+    assert(m.rel_dx == 32767 && m.rel_dy == -32768); // gruda no extremo, não dá a volta
+    m.consume_report();
+    m.virtual_x = INT32_MAX - 1;
+    m.move_relative(100, 0);
+    assert(m.virtual_x == INT32_MAX);
+    m.set_wheel(100, 0);
+    m.set_wheel(100, 0);
+    assert(m.pending_wheel_v == INT8_MAX);
+}
+
 static void test_mouse_buttons_reject_invalid_bits() {
     MouseState m;
     assert(!m.set_buttons(0xE0));
@@ -267,6 +303,9 @@ int main() {
     test_keyboard_idempotent();
     test_keyboard_modifiers();
     test_mouse_mode_switch_neutral();
+    test_mouse_delta_acumula_ate_o_envio();
+    test_roda_nao_rola_de_novo_no_relatorio_seguinte();
+    test_acumulo_do_mouse_satura();
     test_mouse_buttons_reject_invalid_bits();
     test_mouse_absolute_range();
     test_hold_solta_sozinho();

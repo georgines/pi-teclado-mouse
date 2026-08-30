@@ -25,7 +25,15 @@ struct MouseState {
     MouseMode mode = MouseMode::Relative;
     uint8_t buttons = 0;            // bits 0..4 = 5 buttons
     uint16_t abs_x = 0, abs_y = 0;  // 0..32767, valid in Absolute mode
-    int16_t rel_dx = 0, rel_dy = 0; // last relative delta, valid in Relative mode
+    // Carga de UM relatório HID: movimento e roda são eventos, não níveis. Se
+    // acumulam entre comandos e são zerados por consume_report() assim que o
+    // relatório sai — senão o relatório seguinte (o de um clique, digamos)
+    // repetiria o movimento e a rolagem anteriores.
+    int16_t rel_dx = 0, rel_dy = 0;
+    int8_t pending_wheel_v = 0, pending_wheel_h = 0;
+
+    // Registro de estado, não carga de relatório: sobrevive ao envio porque é o
+    // que o STATUS e a tela mostram.
     int32_t virtual_x = 0, virtual_y = 0; // accumulated position while in Relative mode
     int8_t last_wheel_v = 0, last_wheel_h = 0;
 
@@ -36,6 +44,9 @@ struct MouseState {
     void release_all_buttons();
     void set_mode(MouseMode m);                   // neutral: releases buttons, zeroes deltas,
                                                     // zeroes virtual pos when (re-)entering Relative
+
+    // Chamada por quem enviou o relatório HID, e só por ele.
+    void consume_report();
 };
 
 // Single physical device: one keyboard, one mouse. uart_io writes to these
